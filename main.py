@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from database import Base, engine
 from routers import auth, stocks, watchlist
@@ -36,5 +38,6 @@ app.include_router(stocks.router)
 app.include_router(watchlist.router)
 
 @app.get("/")
+@app.head("/")
 def root():
-    return {"status": "PSX Analysis API running"}
+    return JSONResponse({"status": "ok", "service": "PSX Analysis API"})
