@@ -9,6 +9,8 @@ from database import get_db
 from models.stock import StockCache
 from routers.auth import get_current_user
 from models.user import User
+from services.intelligence import classify_stock, benchmark_vs_sector, generate_signal
+
 
 router = APIRouter(prefix="/stocks", tags=["stocks"])
 
@@ -465,10 +467,58 @@ def get_stock_analysis(symbol: str, period: str = "3mo", db: Session = Depends(g
     change        = round(current_price - prev_price, 2)
     change_pct    = round((change / prev_price) * 100, 2) if prev_price else 0
 
+    try:
+        f   = fundamentals or {}
+        vol = analysis.get("volatility", {}).get("daily_pct")
+ 
+        # Classification
+        classification = classify_stock(
+            symbol=symbol, price=current_price,
+            market_cap=f.get("market_cap"), pe=f.get("pe_ratio"),
+            pb=f.get("pb_ratio"), div_yield=f.get("dividend_yield"),
+            roe=f.get("roe"), vol=vol, sector=sector,
+        )
+ 
+        # Sector benchmarking
+        benchmarking = benchmark_vs_sector(
+            sector=sector, pe=f.get("pe_ratio"), pb=f.get("pb_ratio"),
+            div_yield=f.get("dividend_yield"), roe=f.get("roe"),
+            profit_margin=f.get("profit_margin"), vol=vol,
+        )
+ 
+        # Buy / Hold / Sell signal
+        c = analysis.get("composite", {})
+        signal = generate_signal(
+            score       = c.get("score", 50),
+            rsi         = analysis.get("rsi", {}).get("value"),
+            macd_cross  = analysis.get("macd", {}).get("crossover", ""),
+            ma_trend    = analysis.get("moving_averages", {}).get("trend_signal", ""),
+            momentum    = analysis.get("momentum", {}).get("level", ""),
+            vol_level   = analysis.get("volatility", {}).get("level", ""),
+            adx_strength= analysis.get("trend_strength", {}).get("strength", ""),
+            adx_dir     = analysis.get("trend_strength", {}).get("direction", ""),
+            w52_zone    = analysis.get("week52", {}).get("zone", ""),
+            boll_pos    = analysis.get("bollinger", {}).get("position", ""),
+            pe          = f.get("pe_ratio"),
+            div_yield   = f.get("dividend_yield"),
+            sector      = sector,
+            above_vwap  = analysis.get("vwap", {}).get("above_vwap"),
+            obv_conf    = analysis.get("obv", {}).get("confirmation"),
+        )
+ 
+        analysis["classification"] = classification
+        analysis["benchmarking"]   = benchmarking
+        analysis["signal"]         = signal
+ 
+    except Exception as e:
+        pass  # Intelligence layer failure must never crash endpoint    
+        
+        
     # Run analysis
     try:
         from services.analysis import run_full_analysis
         analysis = run_full_analysis(history, fundamentals)
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 

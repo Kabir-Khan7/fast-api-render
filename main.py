@@ -1,29 +1,35 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from database import Base, engine, SessionLocal
+import os
+
+from database import Base, engine
 from routers import auth, stocks, watchlist
-from models import user
-from models.stock import StockCache
-from models.watchlist import Watchlist
-from services.seed import seed_psx_stocks
 
-Base.metadata.create_all(bind=engine)
+app = FastAPI(title="PSX Analysis API")
 
-db = SessionLocal()
-try:
-    seed_psx_stocks(db)
-finally:
-    db.close()
-
-app = FastAPI(title="PSX Analysis API", version="1.0.0")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://next-js-vercel-ashy.vercel.app/login")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "https://next-js-vercel-ashy.vercel.app/login"],
+    allow_origins=[FRONTEND_URL, "https://next-js-vercel-ashy.vercel.app/login"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup():
+    if engine:
+        Base.metadata.create_all(bind=engine)
+        # Seed stocks on first run
+        try:
+            from services.seed import seed_stocks
+            from database import SessionLocal
+            db = SessionLocal()
+            seed_stocks(db)
+            db.close()
+        except Exception as e:
+            print(f"Seed warning: {e}")
 
 app.include_router(auth.router)
 app.include_router(stocks.router)
@@ -31,4 +37,4 @@ app.include_router(watchlist.router)
 
 @app.get("/")
 def root():
-    return {"message": "PSX Analysis API is running"}
+    return {"status": "PSX Analysis API running"}
