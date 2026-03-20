@@ -6,7 +6,9 @@ from fastapi.responses import JSONResponse
 app = FastAPI(title="PSX Analysis API", version="1.0.0")
 
 # ── CORS ───────────────────────────────────────────────────────────────────
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+# IMPORTANT: Cannot use allow_origins=["*"] with allow_credentials=True
+# Must list exact origins explicitly.
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://next-js-vercel-ashy.vercel.app")
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,7 +21,6 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
 # ── Routers ────────────────────────────────────────────────────────────────
@@ -29,28 +30,26 @@ app.include_router(auth.router)
 app.include_router(stocks.router)
 app.include_router(watchlist.router)
 
-# ── Startup ────────────────────────────────────────────────────────────────
+# ── Startup: create tables + seed stocks ───────────────────────────────────
 @app.on_event("startup")
 async def startup():
-    print("[startup] PSX Analysis API starting...")
+    print("[startup] Starting PSX Analysis API...")
     try:
         from database import Base, engine, SessionLocal
         if engine is None:
-            print("[startup] WARNING: No database engine — DATABASE_URL missing")
+            print("[startup] WARNING: No DATABASE_URL set — skipping DB setup")
             return
 
-        # Create all tables
         Base.metadata.create_all(bind=engine)
-        print("[startup] Tables created/verified")
+        print("[startup] ✓ Tables ready")
 
-        # Seed stocks
         db = SessionLocal()
         try:
             from services.seed import seed_stocks
-            count = seed_stocks(db)
-            print(f"[startup] Seed complete — {count} new stocks added")
+            n = seed_stocks(db)
+            print(f"[startup] ✓ Seed done — {n} new stocks inserted")
         except Exception as e:
-            print(f"[startup] Seed error: {e}")
+            print(f"[startup] Seed warning: {e}")
         finally:
             db.close()
 
@@ -58,16 +57,15 @@ async def startup():
         print(f"[startup] ERROR: {e}")
 
 
-# ── Health endpoints ────────────────────────────────────────────────────────
+# ── Health ─────────────────────────────────────────────────────────────────
 @app.get("/")
 @app.head("/")
 def root():
-    return JSONResponse({"status": "ok", "service": "PSX Analysis API", "version": "1.0.0"})
+    return JSONResponse({"status": "ok", "service": "PSX Analysis API"})
 
 
 @app.get("/health")
 def health():
-    """Check DB connection and stock count."""
     try:
         from database import SessionLocal
         from models.stock import StockCache
@@ -76,18 +74,17 @@ def health():
         db.close()
         return {"status": "healthy", "stocks_in_db": count}
     except Exception as e:
-        return JSONResponse({"status": "unhealthy", "error": str(e)}, status_code=500)
+        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
 
 @app.post("/admin/seed")
-def manual_seed():
-    """Manually trigger stock seeding — call this once if /health shows 0 stocks."""
+def force_seed():
     try:
         from database import SessionLocal
         from services.seed import seed_stocks
         db = SessionLocal()
-        count = seed_stocks(db)
+        n = seed_stocks(db)
         db.close()
-        return {"message": f"Seeded {count} new stocks successfully"}
+        return {"seeded": n}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
