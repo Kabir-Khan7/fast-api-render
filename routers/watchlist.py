@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-import yfinance as yf
 
 from database import get_db
 from models.watchlist import Watchlist
@@ -9,79 +8,63 @@ from models.stock import StockCache
 from models.user import User
 from routers.auth import get_current_user
 
+import yfinance as yf
+
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
-class AddRequest(BaseModel):
+
+class WatchlistAdd(BaseModel):
     symbol: str
 
+
 @router.get("/")
-def get_watchlist(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    items = db.query(Watchlist).filter(Watchlist.user_id == current_user.id).all()
-    result = []
-    for item in items:
-        # Try to get live price
-        price_data = {}
-        try:
-            t = yf.Ticker(f"{item.symbol}.KA")
-            hist = t.history(period="2d", interval="1d")
-            if not hist.empty:
-                close = round(float(hist["Close"].iloc[-1]), 2)
-                ldcp  = round(float(hist["Close"].iloc[-2]) if len(hist) > 1 else close, 2)
-                change = round(close - ldcp, 2)
-                chg_pct = round((change / ldcp) * 100, 2) if ldcp else 0
-                price_data = {
-                    "price": close,
-                    "ldcp": ldcp,
-                    "change": change,
-                    "change_pct": chg_pct,
-                }
-        except Exception:
-            price_data = {"price": None, "ldcp": None, "change": None, "change_pct": None}
-
-        result.append({
-            "id": item.id,
-            "symbol": item.symbol,
-            "name": item.name,
-            "sector": item.sector,
-            "added_at": item.created_at,
-            **price_data,
-        })
-    return result
-
-@router.post("/")
-def add_to_watchlist(
-    body: AddRequest,
+def get_watchlist(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    symbol = body.symbol.upper()
+    items = db.query(Watchlist).filter(Watchlist.user_id == current_user.id).all()
+    result = []
+    for item in items:
+        stock = db.query(StockCache).filter(StockCache.symbol == item.symbol).first()
+        entry = {
+            "symbol": item.symbol,
+            "name":   stock.name   if stock else item.symbol,
+            "sector": stock.sector if stock else "N/A",
+            "close":  None, "change": None, "change_pct": None,
+        }
+        # Try to get live price — skip if fails
+        try:
+            t    = yf.Ticker(f"{item.symbol}.KA")
+            hist = t.history(period="5d", interval="1d")
+            if not hist.empty and len(hist) >= 2:
+                c = float(hist["Close"].iloc[-1])
+                p = float(hist["Close"].iloc[-2])
+                entry["close"]      = round(c, 2)
+                entry["change"]     = round(c - p, 2)
+                entry["change_pct"] = round(((c - p) / p) * 100, 2) if p else 0
+        except Exception:
+            pass
+        result.append(entry)
+    return result
 
-    # Check limit
-    count = db.query(Watchlist).filter(Watchlist.user_id == current_user.id).count()
-    if count >= 20:
-        raise HTTPException(status_code=400, detail="Watchlist limit reached (20 stocks max).")
 
-    # Check duplicate
+@router.post("/", status_code=201)
+def add_to_watchlist(
+    body: WatchlistAdd,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    symbol = body.symbol.upper().strip()
     existing = db.query(Watchlist).filter(
         Watchlist.user_id == current_user.id,
-        Watchlist.symbol == symbol,
+        Watchlist.symbol  == symbol,
     ).first()
     if existing:
-        raise HTTPException(status_code=400, detail=f"{symbol} is already in your watchlist.")
-
-    # Get name/sector from stock cache
-    stock = db.query(StockCache).filter(StockCache.symbol == symbol).first()
-
-    item = Watchlist(
-        user_id=current_user.id,
-        symbol=symbol,
-        name=stock.name if stock else symbol,
-        sector=stock.sector if stock else "N/A",
-    )
-    db.add(item)
+        raise HTTPException(400, f"{symbol} already in watchlist")
+    db.add(Watchlist(user_id=current_user.id, symbol=symbol))
     db.commit()
-    db.refresh(item)
-    return {"message": f"{symbol} added to watchlist.", "symbol": symbol}
+    return {"message": f"{symbol} added to watchlist"}
+
 
 @router.delete("/{symbol}")
 def remove_from_watchlist(
@@ -89,15 +72,17 @@ def remove_from_watchlist(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    symbol = symbol.upper().strip()
     item = db.query(Watchlist).filter(
         Watchlist.user_id == current_user.id,
-        Watchlist.symbol == symbol.upper(),
+        Watchlist.symbol  == symbol,
     ).first()
     if not item:
-        raise HTTPException(status_code=404, detail="Stock not in watchlist.")
+        raise HTTPException(404, f"{symbol} not in watchlist")
     db.delete(item)
     db.commit()
-    return {"message": f"{symbol.upper()} removed from watchlist."}
+    return {"message": f"{symbol} removed"}
+
 
 @router.get("/check/{symbol}")
 def check_watchlist(
@@ -105,8 +90,9 @@ def check_watchlist(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    symbol = symbol.upper().strip()
     exists = db.query(Watchlist).filter(
         Watchlist.user_id == current_user.id,
-        Watchlist.symbol == symbol.upper(),
+        Watchlist.symbol  == symbol,
     ).first()
     return {"in_watchlist": exists is not None}
